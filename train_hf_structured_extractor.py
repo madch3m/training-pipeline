@@ -103,6 +103,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def train_model(args: argparse.Namespace) -> None:
+    import syllabus_torch_compat
+
+    syllabus_torch_compat.apply_torch_ao_compat_patches()
+
     from datasets import load_dataset
     import mlflow
     from peft import LoraConfig
