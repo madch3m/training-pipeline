@@ -103,3 +103,20 @@ def test_build_finetune_dataset_raises_when_no_usable_text(tmp_path: Path):
 
     with pytest.raises(ValueError, match="No usable document text"):
         build_finetune_dataset(input_path, train_output, valid_output)
+
+
+def test_build_finetune_dataset_allow_empty_outputs(tmp_path: Path):
+    input_path = tmp_path / "ingested.jsonl"
+    input_path.write_text(json.dumps({"id": "x", "text": ""}) + "\n", encoding="utf-8")
+    train_output = tmp_path / "finetune" / "train.jsonl"
+    valid_output = tmp_path / "finetune" / "valid.jsonl"
+
+    train, valid = build_finetune_dataset(
+        input_path,
+        train_output,
+        valid_output,
+        allow_empty_outputs=True,
+    )
+    assert train == [] and valid == []
+    assert train_output.read_text(encoding="utf-8") == ""
+    assert valid_output.read_text(encoding="utf-8") == ""

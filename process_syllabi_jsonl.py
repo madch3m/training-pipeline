@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
+from pipeline_errors import log_pipeline_error
+
 
 TEXT_FIELD_CANDIDATES = (
     "text",
@@ -62,16 +64,35 @@ class Span:
     source: str
 
 
-def load_jsonl(path: str | Path) -> list[dict]:
+def load_jsonl(
+    path: str | Path,
+    *,
+    strict: bool = True,
+    error_log_path: str | Path | None = None,
+    stage: str = "load_jsonl",
+) -> list[dict]:
     rows: list[dict] = []
     for line_number, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
         stripped = line.strip()
         if not stripped:
             continue
         try:
-            rows.append(json.loads(stripped))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON on line {line_number}: {exc}") from exc
+            row = json.loads(stripped)
+            if not isinstance(row, dict):
+                raise ValueError(f"expected object, got {type(row).__name__}")
+            rows.append(row)
+        except (json.JSONDecodeError, ValueError) as exc:
+            if strict:
+                raise ValueError(f"Invalid JSON on line {line_number}: {exc}") from exc
+            if error_log_path:
+                log_pipeline_error(
+                    error_log_path,
+                    stage=stage,
+                    message=str(exc),
+                    line=line_number,
+                    path=str(path),
+                    snippet=stripped[:240],
+                )
     return rows
 
 
@@ -200,17 +221,79 @@ def build_output_record(record: dict, index: int) -> dict:
     }
 
 
-def process_jsonl(input_path: str | Path, output_path: str | Path) -> list[dict]:
-    rows = load_jsonl(input_path)
+def default_process_error_log(output_path: str | Path) -> Path:
+    out = Path(output_path)
+    return out.parent / f"{out.stem}_errors.jsonl"
+
+
+def process_jsonl(
+    input_path: str | Path,
+    output_path: str | Path,
+    *,
+    tolerant: bool = True,
+    strict_jsonl: bool | None = None,
+    error_log_path: str | Path | None = None,
+) -> list[dict]:
+    """Run labeling. If ``tolerant`` (default), skip bad JSON lines and per-record failures; log to *error_log_path*."""
+    if strict_jsonl is not None:
+        tolerant = not strict_jsonl
+    log_path: Path | None
+    if error_log_path is not None:
+        log_path = Path(error_log_path)
+    elif tolerant:
+        log_path = default_process_error_log(output_path)
+    else:
+        log_path = None
+
+    if log_path and tolerant:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if log_path.exists():
+            log_path.write_text("", encoding="utf-8")
+
+    rows = load_jsonl(
+        input_path,
+        strict=not tolerant,
+        error_log_path=log_path if tolerant else None,
+        stage="process_jsonl_load",
+    )
     processed: list[dict] = []
-    skipped = 0
+    skipped_no_text = 0
+    skipped_record_error = 0
     for index, record in enumerate(rows, start=1):
+        if not isinstance(record, dict):
+            skipped_record_error += 1
+            if log_path and tolerant:
+                log_pipeline_error(
+                    log_path,
+                    stage="process_jsonl_row",
+                    message="record is not a JSON object",
+                    index=index,
+                    path=str(input_path),
+                )
+            continue
         if not has_usable_document_text(record):
-            skipped += 1
+            skipped_no_text += 1
             record_id = normalize_record_id(record, index)
             print(f"[process] skip {record_id}: no usable document text")
             continue
-        processed.append(build_output_record(record, index))
+        try:
+            processed.append(build_output_record(record, index))
+        except Exception as exc:
+            skipped_record_error += 1
+            if not tolerant:
+                raise
+            record_id = normalize_record_id(record, index)
+            print(f"[process] skip {record_id}: {exc}")
+            if log_path:
+                log_pipeline_error(
+                    log_path,
+                    stage="process_jsonl_record",
+                    message=str(exc),
+                    exc_type=type(exc).__name__,
+                    record_id=record_id,
+                    index=index,
+                    path=str(input_path),
+                )
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -219,17 +302,28 @@ def process_jsonl(input_path: str | Path, output_path: str | Path) -> list[dict]
         output.write_text("", encoding="utf-8")
         if not rows:
             return []
+        if tolerant:
+            print(
+                f"[process] warning: no labeled rows ({len(rows)} loaded, "
+                f"{skipped_no_text} no text, {skipped_record_error} errors). "
+                f"Output empty: {output_path}"
+            )
+            return []
         hint = ""
-        if skipped == len(rows):
+        if skipped_no_text == len(rows):
             hint = " All rows lacked non-empty text (check ingest: empty PDF/HTML extractions or ingest_error rows)."
         raise ValueError(
             f"No usable document text in {input_path!r} "
-            f"({len(rows)} rows read, {skipped} skipped).{hint}"
+            f"({len(rows)} rows read, {skipped_no_text} skipped).{hint}"
         )
 
     with output.open("w", encoding="utf-8") as handle:
         for item in processed:
             handle.write(json.dumps(item, ensure_ascii=True) + "\n")
+    if skipped_record_error or skipped_no_text:
+        print(
+            f"[process] wrote {len(processed)} rows; skipped_no_text={skipped_no_text}, record_errors={skipped_record_error}"
+        )
     return processed
 
 
@@ -243,12 +337,27 @@ def parse_args() -> argparse.Namespace:
         default="data/labeled/syllabus_entities.jsonl",
         help="Path for the enriched JSONL output.",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Abort on invalid JSONL lines or per-record errors (default: tolerant).",
+    )
+    parser.add_argument(
+        "--error-log",
+        default=None,
+        help="Append/load error details here when tolerant (default: next to output, *_errors.jsonl).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    processed = process_jsonl(args.input_jsonl, args.output_jsonl)
+    processed = process_jsonl(
+        args.input_jsonl,
+        args.output_jsonl,
+        tolerant=not args.strict,
+        error_log_path=args.error_log,
+    )
     print(f"Processed {len(processed)} records (with usable text).")
     print(f"Output: {args.output_jsonl}")
 

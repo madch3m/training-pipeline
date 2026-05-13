@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 from typing import Iterable
 
+from pipeline_errors import log_pipeline_error
+
 _PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT_CSV = _PACKAGE_DIR / "us_freshman_core_syllabi_index.csv"
 DEFAULT_OUTPUT_JSONL = _PACKAGE_DIR / "data" / "ingested" / "us_freshman_core_syllabi_urls.jsonl"
@@ -37,16 +39,25 @@ def row_to_record(row: dict[str, str], index: int) -> dict[str, str]:
     return record
 
 
+def default_csv_error_log(output_jsonl: str | Path) -> Path:
+    out = Path(output_jsonl)
+    return out.parent / f"{out.stem}_csv_errors.jsonl"
+
+
 def csv_to_jsonl(
     input_csv: str | Path,
     output_jsonl: str | Path,
     *,
     max_rows: int | None = None,
     skip_empty_url: bool = True,
+    error_log_path: str | Path | None = None,
 ) -> int:
     written = 0
     out = Path(output_jsonl)
     out.parent.mkdir(parents=True, exist_ok=True)
+    err_path = Path(error_log_path) if error_log_path else default_csv_error_log(output_jsonl)
+    err_path.parent.mkdir(parents=True, exist_ok=True)
+    err_path.write_text("", encoding="utf-8")
 
     with out.open("w", encoding="utf-8") as handle:
         for index, row in enumerate(iter_csv_records(input_csv), start=1):
@@ -54,9 +65,23 @@ def csv_to_jsonl(
                 break
             try:
                 if skip_empty_url and not (row.get("source_url") or "").strip():
+                    log_pipeline_error(
+                        err_path,
+                        stage="csv_to_jsonl",
+                        message="skipped_empty_source_url",
+                        csv_row=index,
+                        path=str(input_csv),
+                    )
                     continue
                 record = row_to_record(row, index)
-            except ValueError:
+            except ValueError as exc:
+                log_pipeline_error(
+                    err_path,
+                    stage="csv_to_jsonl",
+                    message=str(exc),
+                    csv_row=index,
+                    path=str(input_csv),
+                )
                 continue
             handle.write(json.dumps(record, ensure_ascii=True) + "\n")
             written += 1
@@ -82,6 +107,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not skip rows with blank source_url (default: skip).",
     )
+    parser.add_argument(
+        "--error-log",
+        default=None,
+        help="Append CSV skip/error events here (default: next to output *_csv_errors.jsonl).",
+    )
     return parser.parse_args()
 
 
@@ -92,6 +122,7 @@ def main() -> None:
         args.output_jsonl,
         max_rows=args.max_rows,
         skip_empty_url=not args.keep_empty_url_rows,
+        error_log_path=args.error_log,
     )
     print(f"Wrote {count} JSONL records.")
     print(f"Output: {args.output_jsonl}")

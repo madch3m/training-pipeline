@@ -70,6 +70,7 @@ class SyllabusPipelineConfig:
     mlflow_tracking_uri: str | None = None
     mlflow_experiment: str = "syllabus-structured-extraction"
     mlflow_run_name: str | None = None
+    allow_empty_finetune: bool = False
 
     @classmethod
     def for_repo(cls, repo_root: Path) -> SyllabusPipelineConfig:
@@ -126,6 +127,7 @@ def step_build_finetune(cfg: SyllabusPipelineConfig) -> tuple[list[dict], list[d
         validation_ratio=cfg.validation_ratio,
         max_text_chars=cfg.max_text_chars,
         seed=cfg.finetune_seed,
+        allow_empty_outputs=cfg.allow_empty_finetune,
     )
 
 

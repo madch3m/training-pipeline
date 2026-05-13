@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 import fitz
 import requests
 
+from pipeline_errors import log_pipeline_error
 from process_syllabi_jsonl import load_jsonl, normalize_record_id
 
 DEFAULT_TIMEOUT_SECONDS = 25.0
@@ -193,6 +194,11 @@ def build_output_row(
     return row
 
 
+def default_ingest_input_error_log(output_path: str | Path) -> Path:
+    out = Path(output_path)
+    return out.parent / f"{out.stem}_input_errors.jsonl"
+
+
 def ingest_jsonl_from_urls(
     input_path: str | Path,
     output_path: str | Path,
@@ -208,11 +214,21 @@ def ingest_jsonl_from_urls(
     max_rows: int | None = None,
     session: requests.Session | None = None,
 ) -> tuple[int, int, int]:
-    rows = load_jsonl(input_path)
-    if max_rows is not None:
-        rows = rows[:max_rows]
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    input_error_log = default_ingest_input_error_log(output_path)
+    if not resume:
+        input_error_log.parent.mkdir(parents=True, exist_ok=True)
+        input_error_log.write_text("", encoding="utf-8")
+
+    rows = load_jsonl(
+        input_path,
+        strict=False,
+        error_log_path=input_error_log,
+        stage="ingest_load_input",
+    )
+    if max_rows is not None:
+        rows = rows[:max_rows]
 
     http = session or requests.Session()
     http.headers.update(DEFAULT_HEADERS)
@@ -229,6 +245,17 @@ def ingest_jsonl_from_urls(
     mode = "a" if resume else "w"
     with output.open(mode, encoding="utf-8") as handle:
         for index, record in enumerate(rows, start=1):
+            if not isinstance(record, dict):
+                failed += 1
+                log_pipeline_error(
+                    input_error_log,
+                    stage="ingest_row",
+                    message="record is not a JSON object",
+                    index=index,
+                    path=str(input_path),
+                )
+                print(f"[{index}] skip: invalid record type")
+                continue
             request_url = resolve_record_url(record, url_field)
             if not request_url:
                 failed += 1
