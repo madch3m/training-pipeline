@@ -12,6 +12,7 @@ Example:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from ingest_jsonl_from_urls import ingest_jsonl_from_urls
 from process_syllabi_jsonl import process_jsonl
 from syllabi_index_csv_to_jsonl import csv_to_jsonl
 from train_hf_structured_extractor import parse_args as train_parse_args, train_model as train_hf_model
+from validate_training_readiness import ReadinessThresholds, evaluate_readiness
 
 
 def find_repo_root(start: Path | None = None) -> Path:
@@ -71,6 +73,12 @@ class SyllabusPipelineConfig:
     mlflow_experiment: str = "syllabus-structured-extraction"
     mlflow_run_name: str | None = None
     allow_empty_finetune: bool = False
+    enforce_training_gates: bool = True
+    readiness_output_json: Path | None = None
+    min_parse_rate: float = 0.995
+    min_schema_clean_rate: float = 0.995
+    max_document_id_overlap: int = 0
+    max_domain_overlap_ratio: float = 0.70
 
     @classmethod
     def for_repo(cls, repo_root: Path) -> SyllabusPipelineConfig:
@@ -174,6 +182,24 @@ def build_train_argv(cfg: SyllabusPipelineConfig) -> list[str]:
 
 def step_train(cfg: SyllabusPipelineConfig) -> None:
     _chdir_repo(cfg)
+    if cfg.enforce_training_gates:
+        thresholds = ReadinessThresholds(
+            min_parse_rate=cfg.min_parse_rate,
+            min_schema_clean_rate=cfg.min_schema_clean_rate,
+            max_document_id_overlap=cfg.max_document_id_overlap,
+            max_domain_overlap_ratio=cfg.max_domain_overlap_ratio,
+        )
+        report = evaluate_readiness(cfg.train_jsonl, cfg.valid_jsonl, thresholds)
+        if cfg.readiness_output_json:
+            cfg.readiness_output_json.parent.mkdir(parents=True, exist_ok=True)
+            cfg.readiness_output_json.write_text(
+                json.dumps(report, indent=2, ensure_ascii=True),
+                encoding="utf-8",
+            )
+        if not report["ok"]:
+            raise ValueError(
+                "Training readiness gates failed; inspect report violations before launching training."
+            )
     argv = build_train_argv(cfg)
     old = sys.argv
     sys.argv = argv
