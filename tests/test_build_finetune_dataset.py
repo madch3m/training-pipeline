@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from build_finetune_dataset import build_chat_example, build_finetune_dataset
 
 
@@ -63,3 +65,41 @@ def test_build_finetune_dataset_writes_train_and_valid_files(tmp_path: Path):
     written_valid = valid_output.read_text(encoding="utf-8").splitlines()
     assert written_train
     assert written_valid
+
+
+def test_build_finetune_dataset_skips_rows_without_usable_text(tmp_path: Path):
+    input_path = tmp_path / "ingested.jsonl"
+    input_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"id": "empty", "text": ""}),
+                json.dumps({"id": "bad", "text": "   "}),
+                json.dumps(
+                    {
+                        "id": "good",
+                        "text": "CS 101 syllabus\nGrading: Homework 40%\nInstructor: Professor Jane Smith",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    train_output = tmp_path / "finetune" / "train.jsonl"
+    valid_output = tmp_path / "finetune" / "valid.jsonl"
+
+    train, valid = build_finetune_dataset(input_path, train_output, valid_output, validation_ratio=0.0, seed=1)
+
+    assert len(train) == 1
+    assert len(valid) == 0
+    assert json.loads(train_output.read_text(encoding="utf-8").splitlines()[0])["messages"]
+
+
+def test_build_finetune_dataset_raises_when_no_usable_text(tmp_path: Path):
+    input_path = tmp_path / "ingested.jsonl"
+    input_path.write_text(json.dumps({"id": "x", "text": ""}) + "\n", encoding="utf-8")
+    train_output = tmp_path / "finetune" / "train.jsonl"
+    valid_output = tmp_path / "finetune" / "valid.jsonl"
+
+    with pytest.raises(ValueError, match="No usable document text"):
+        build_finetune_dataset(input_path, train_output, valid_output)

@@ -286,6 +286,8 @@ def ingest_jsonl_from_urls(
             try:
                 content, final_url, content_type = fetch_url(request_url, session=http, timeout=timeout)
                 text, doc_format = extract_text_from_bytes(final_url, content_type, content)
+                if not (text or "").strip():
+                    raise ValueError("extracted document text is empty")
                 row = build_output_row(
                     record,
                     index,

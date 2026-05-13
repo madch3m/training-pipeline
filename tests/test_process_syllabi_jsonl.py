@@ -1,9 +1,12 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from process_syllabi_jsonl import (
     build_output_record,
     detect_text_field,
+    has_usable_document_text,
     load_jsonl,
     process_jsonl,
 )
@@ -50,6 +53,39 @@ def test_build_output_record_runs_regex_and_ner():
     assert "INSTRUCTOR" in ner_labels
     assert "SECTION" in ner_labels
     assert "CONCEPT" in ner_labels
+
+
+def test_has_usable_document_text_false_for_empty_text():
+    assert not has_usable_document_text({"id": "1", "text": ""})
+    assert not has_usable_document_text({"id": "1", "text": "   "})
+    assert has_usable_document_text({"id": "1", "text": "hello world syllabus body " * 5})
+
+
+def test_process_jsonl_skips_rows_without_usable_text(tmp_path: Path):
+    input_path = tmp_path / "source.jsonl"
+    output_path = tmp_path / "labeled" / "entities.jsonl"
+    input_path.write_text(
+        json.dumps({"doc_id": "empty", "text": ""}) + "\n"
+        + json.dumps(
+            {"doc_id": "ok", "body": "EECS 201 syllabus\nGrading: Project 25%\nRequired Readings: paper one"},
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    processed = process_jsonl(input_path, output_path)
+
+    assert len(processed) == 1
+    assert processed[0]["id"] == "ok"
+
+
+def test_process_jsonl_raises_when_no_usable_rows(tmp_path: Path):
+    input_path = tmp_path / "source.jsonl"
+    output_path = tmp_path / "labeled" / "entities.jsonl"
+    input_path.write_text(json.dumps({"id": "only-empty", "text": ""}) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="No usable document text"):
+        process_jsonl(input_path, output_path)
 
 
 def test_process_jsonl_writes_enriched_output(tmp_path: Path):

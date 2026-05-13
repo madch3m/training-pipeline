@@ -11,6 +11,7 @@ from process_syllabi_jsonl import (
     detect_text_field,
     extract_heuristic_ner,
     extract_regex_entities,
+    has_usable_document_text,
     load_jsonl,
     normalize_record_id,
 )
@@ -127,7 +128,25 @@ def build_finetune_dataset(
     seed: int = 13,
 ) -> tuple[list[dict], list[dict]]:
     rows = load_jsonl(input_jsonl)
-    examples = [build_chat_example(record, index, max_text_chars) for index, record in enumerate(rows, start=1)]
+    examples: list[dict] = []
+    skipped = 0
+    for index, record in enumerate(rows, start=1):
+        if not has_usable_document_text(record):
+            skipped += 1
+            continue
+        examples.append(build_chat_example(record, index, max_text_chars))
+
+    if not examples:
+        if not rows:
+            write_jsonl(train_output, [])
+            write_jsonl(valid_output, [])
+            return [], []
+        raise ValueError(
+            f"No usable document text in {input_jsonl!r} "
+            f"({len(rows)} rows read, {skipped} skipped). "
+            "Re-run ingest or remove rows with empty `text` / failed fetches."
+        )
+
     train, valid = split_examples(examples, validation_ratio, seed)
     write_jsonl(train_output, train)
     write_jsonl(valid_output, valid)

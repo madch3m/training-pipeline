@@ -86,6 +86,15 @@ def detect_text_field(record: dict) -> tuple[str, str]:
     raise ValueError("Could not determine a text field for record")
 
 
+def has_usable_document_text(record: dict) -> bool:
+    """True if ``detect_text_field`` succeeds and the chosen string has non-whitespace content."""
+    try:
+        _, text = detect_text_field(record)
+    except ValueError:
+        return False
+    return bool(text.strip())
+
+
 def normalize_record_id(record: dict, index: int) -> str:
     value = record.get("id") or record.get("doc_id") or record.get("uuid")
     if value:
@@ -193,10 +202,31 @@ def build_output_record(record: dict, index: int) -> dict:
 
 def process_jsonl(input_path: str | Path, output_path: str | Path) -> list[dict]:
     rows = load_jsonl(input_path)
-    processed = [build_output_record(record, index) for index, record in enumerate(rows, start=1)]
+    processed: list[dict] = []
+    skipped = 0
+    for index, record in enumerate(rows, start=1):
+        if not has_usable_document_text(record):
+            skipped += 1
+            record_id = normalize_record_id(record, index)
+            print(f"[process] skip {record_id}: no usable document text")
+            continue
+        processed.append(build_output_record(record, index))
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+
+    if not processed:
+        output.write_text("", encoding="utf-8")
+        if not rows:
+            return []
+        hint = ""
+        if skipped == len(rows):
+            hint = " All rows lacked non-empty text (check ingest: empty PDF/HTML extractions or ingest_error rows)."
+        raise ValueError(
+            f"No usable document text in {input_path!r} "
+            f"({len(rows)} rows read, {skipped} skipped).{hint}"
+        )
+
     with output.open("w", encoding="utf-8") as handle:
         for item in processed:
             handle.write(json.dumps(item, ensure_ascii=True) + "\n")
@@ -219,7 +249,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     processed = process_jsonl(args.input_jsonl, args.output_jsonl)
-    print(f"Processed {len(processed)} records.")
+    print(f"Processed {len(processed)} records (with usable text).")
     print(f"Output: {args.output_jsonl}")
 
 
