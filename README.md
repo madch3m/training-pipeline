@@ -121,6 +121,19 @@ From `/content/training_pipeline`:
 !python evaluate_structured_json.py --sft-jsonl data/finetune/train.jsonl --output-json reports/sft_json_eval.json
 ```
 
+**After training** — run the adapter on held-out chat examples and score JSON validity plus per-field overlap (install `".[train]"` first, GPU recommended):
+
+```bash
+!python evaluate_trained_extractor.py \
+  --adapter-path artifacts/hf_syllabus_extractor \
+  --sft-jsonl data/finetune/valid.jsonl \
+  --max-samples 50 \
+  --predictions-jsonl reports/extractor_predictions.jsonl \
+  --report-json reports/extractor_eval.json
+```
+
+On CPU-only machines pass `--device-map cpu` (slower; uses `float32`).
+
 See `docs/ML_EVAL_RUBRIC.md`, `docs/TRAIN_REPORT_TEMPLATE.md`, and `docs/RISK_REGISTER.md` for checklists and reporting.
 
 ## 8. Zip and download artifacts
@@ -130,6 +143,45 @@ from google.colab import files
 !cd /content/training_pipeline && zip -rq bundle.zip artifacts/hf_syllabus_extractor data/finetune mlruns 2>/dev/null; true
 files.download("/content/training_pipeline/bundle.zip")
 ```
+
+## 9. Edge training and release gates
+
+From `/content/training_pipeline` (or local repo root):
+
+```bash
+# 1) Pre-training data gates (parse/schema/split integrity)
+python validate_training_readiness.py \
+  --train-jsonl data/finetune/train.jsonl \
+  --valid-jsonl data/finetune/valid.jsonl \
+  --strict \
+  --output-json reports/training_readiness.json
+
+# 2) Frontier training (0.5B vs 1.5B) + winner report
+python train_frontier.py \
+  --train-jsonl data/finetune/train.jsonl \
+  --valid-jsonl data/finetune/valid.jsonl \
+  --report-json artifacts/frontier/frontier_report.json
+
+# 3) Export edge artifacts (ONNX/GGUF/CoreML manifest)
+python edge/export_quantized_model.py \
+  --adapter-path artifacts/hf_syllabus_extractor \
+  --output-dir artifacts/edge \
+  --manifest-json artifacts/edge/quantization_manifest.json
+
+# 4) Benchmark edge inference (latency, memory, quality)
+python edge/benchmark_edge_inference.py \
+  --adapter-path artifacts/hf_syllabus_extractor \
+  --sft-jsonl data/finetune/valid.jsonl \
+  --report-json reports/edge_benchmark.json
+
+# 5) Go / no-go release gates + privacy-safe telemetry aggregate
+python edge/release_gates.py --benchmark-json reports/edge_benchmark.json --strict
+python edge/privacy_telemetry.py \
+  --benchmark-json reports/edge_benchmark.json \
+  --output-json reports/edge_telemetry_aggregate.json
+```
+
+Deployment thresholds and device matrix are documented in `docs/EDGE_DEPLOYMENT_PLAN.md`.
 
 ## Troubleshooting
 

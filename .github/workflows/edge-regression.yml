@@ -1,0 +1,48 @@
+name: edge-regression
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * *"
+
+jobs:
+  tests-and-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Unit tests
+        run: python -m pytest tests -q
+
+      - name: Data readiness gate (if finetune files exist)
+        run: |
+          if [ -f data/finetune/train.jsonl ] && [ -f data/finetune/valid.jsonl ]; then
+            python validate_training_readiness.py \
+              --train-jsonl data/finetune/train.jsonl \
+              --valid-jsonl data/finetune/valid.jsonl \
+              --strict \
+              --output-json reports/ci_training_readiness.json
+          else
+            echo "Skipping readiness gate: no train/valid jsonl in repo checkout."
+          fi
+
+      - name: Edge release gate (if benchmark exists)
+        run: |
+          if [ -f reports/edge_benchmark.json ]; then
+            python edge/release_gates.py --benchmark-json reports/edge_benchmark.json --strict
+            python edge/privacy_telemetry.py --benchmark-json reports/edge_benchmark.json \
+              --output-json reports/edge_telemetry_aggregate.json
+          else
+            echo "Skipping edge release gate: no benchmark report found."
+          fi
