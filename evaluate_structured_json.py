@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from build_finetune_dataset import STUDY_PLAN_LIST_FIELDS
+
 # Expected keys in assistant payloads produced by ``build_finetune_dataset``.
 EXPECTED_ASSISTANT_KEYS = frozenset(
     {
@@ -22,10 +24,26 @@ EXPECTED_ASSISTANT_KEYS = frozenset(
         "due_dates",
         "course_dates",
         "concepts",
+        "study_plan",
         "text_field",
         "entities",
     }
 )
+
+STRING_LIST_FIELDS_FOR_METRICS = (
+    "course_codes",
+    "instructors",
+    "emails",
+    "section_names",
+    "assignments",
+    "readings",
+    "grading_weights",
+    "due_dates",
+    "course_dates",
+    "concepts",
+)
+
+STUDY_PLAN_ITEM_KEYS = frozenset({"section_heading", *STUDY_PLAN_LIST_FIELDS})
 
 
 def parse_assistant_json(raw: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -37,6 +55,116 @@ def parse_assistant_json(raw: str) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(data, dict):
         return None, "root_not_object"
     return data, None
+
+
+def _flatten_study_plan(plan: Any) -> dict[str, set[str]]:
+    buckets = {field: set() for field in STUDY_PLAN_LIST_FIELDS}
+    if not isinstance(plan, list):
+        return buckets
+    for block in plan:
+        if not isinstance(block, dict):
+            continue
+        for field in STUDY_PLAN_LIST_FIELDS:
+            buckets[field] |= _normalized_string_set(block.get(field))
+    return buckets
+
+
+def _normalized_string_set(values: Any) -> set[str]:
+    if not isinstance(values, list):
+        return set()
+    out: set[str] = set()
+    for item in values:
+        if item is None:
+            continue
+        s = str(item).strip().lower()
+        if s:
+            out.add(s)
+    return out
+
+
+def f1_precision_recall(pred_set: set[str], gold_set: set[str]) -> tuple[float, float, float]:
+    if not pred_set and not gold_set:
+        return 1.0, 1.0, 1.0
+    if not gold_set:
+        # Predictions with no gold labels are false positives.
+        return 0.0, 0.0, 0.0
+    if not pred_set:
+        return 0.0, 1.0, 0.0
+    tp = len(pred_set & gold_set)
+    fp = len(pred_set - gold_set)
+    fn = len(gold_set - pred_set)
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    if precision + recall == 0:
+        return 0.0, precision, recall
+    f1 = 2 * precision * recall / (precision + recall)
+    return f1, precision, recall
+
+
+def compare_assistant_payloads(pred: dict[str, Any], gold: dict[str, Any]) -> dict[str, Any]:
+    """Per-field set overlap vs gold for string-list fields; ``document_id`` exact match (string)."""
+    doc_pred = pred.get("document_id")
+    doc_gold = gold.get("document_id")
+    doc_match = doc_pred is not None and doc_gold is not None and str(doc_pred) == str(doc_gold)
+
+    field_scores: dict[str, dict[str, float]] = {}
+    macro_f1_sum = 0.0
+    n_fields = 0
+    for key in STRING_LIST_FIELDS_FOR_METRICS:
+        f1, prec, rec = f1_precision_recall(
+            _normalized_string_set(pred.get(key)),
+            _normalized_string_set(gold.get(key)),
+        )
+        field_scores[key] = {"f1": f1, "precision": prec, "recall": rec}
+        macro_f1_sum += f1
+        n_fields += 1
+
+    macro_f1 = macro_f1_sum / n_fields if n_fields else 0.0
+
+    gold_sp = _flatten_study_plan(gold.get("study_plan"))
+    pred_sp = _flatten_study_plan(pred.get("study_plan"))
+    study_field_scores: dict[str, dict[str, float]] = {}
+    study_sum = 0.0
+    for field in STUDY_PLAN_LIST_FIELDS:
+        f1, prec, rec = f1_precision_recall(pred_sp[field], gold_sp[field])
+        study_field_scores[field] = {"f1": f1, "precision": prec, "recall": rec}
+        study_sum += f1
+    study_plan_macro_f1 = study_sum / len(STUDY_PLAN_LIST_FIELDS) if STUDY_PLAN_LIST_FIELDS else 0.0
+
+    entities_pred = pred.get("entities")
+    entities_gold = gold.get("entities")
+    entities_len_match = (
+        isinstance(entities_pred, list)
+        and isinstance(entities_gold, list)
+        and len(entities_pred) == len(entities_gold)
+    )
+
+    return {
+        "document_id_match": doc_match,
+        "macro_f1_string_lists": macro_f1,
+        "field_f1": field_scores,
+        "study_plan_macro_f1": study_plan_macro_f1,
+        "study_plan_field_f1": study_field_scores,
+        "entities_length_match": entities_len_match,
+        "text_field_match": pred.get("text_field") == gold.get("text_field"),
+    }
+
+
+def aggregate_compare_stats(per_example: list[dict[str, Any]]) -> dict[str, Any]:
+    if not per_example:
+        return {"examples": 0}
+    n = len(per_example)
+    doc_ok = sum(1 for row in per_example if row.get("document_id_match"))
+    parse_ok = sum(1 for row in per_example if row.get("parsed"))
+    macro_avg = sum(float(row.get("macro_f1_string_lists") or 0.0) for row in per_example) / n
+    study_avg = sum(float(row.get("study_plan_macro_f1") or 0.0) for row in per_example) / n
+    return {
+        "examples": n,
+        "json_parse_success_rate": parse_ok / n,
+        "document_id_accuracy": doc_ok / n,
+        "mean_macro_f1_string_lists": macro_avg,
+        "mean_study_plan_macro_f1": study_avg,
+    }
 
 
 def assistant_payload_from_sft_example(example: dict) -> tuple[str | None, str | None]:
@@ -76,6 +204,34 @@ def validate_assistant_object(obj: dict[str, Any]) -> list[str]:
         val = obj.get(key)
         if val is not None and not isinstance(val, list):
             issues.append(f"{key}_not_list")
+    study_plan = obj.get("study_plan")
+    if study_plan is not None:
+        if not isinstance(study_plan, list):
+            issues.append("study_plan_not_list")
+        else:
+            for i, block in enumerate(study_plan):
+                if not isinstance(block, dict):
+                    issues.append(f"study_plan_item_{i}_not_object")
+                    continue
+                unknown = set(block.keys()) - STUDY_PLAN_ITEM_KEYS
+                if unknown:
+                    issues.append(f"study_plan_item_{i}_extra_keys:{sorted(unknown)}")
+                sh = block.get("section_heading")
+                if sh is not None and not isinstance(sh, str):
+                    issues.append(f"study_plan_item_{i}_section_heading_not_str")
+                for field in STUDY_PLAN_LIST_FIELDS:
+                    vals = block.get(field)
+                    if vals is not None and not isinstance(vals, list):
+                        issues.append(f"study_plan_item_{i}_{field}_not_list")
+                        continue
+                    if isinstance(vals, list):
+                        bad = False
+                        for x in vals:
+                            if x is not None and not isinstance(x, str):
+                                bad = True
+                                break
+                        if bad:
+                            issues.append(f"study_plan_item_{i}_{field}_non_string_entry")
     return issues
 
 

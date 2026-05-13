@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from build_finetune_dataset import build_chat_example, build_finetune_dataset
+from build_finetune_dataset import build_chat_example, build_finetune_dataset, build_study_plan
 
 
 def test_build_chat_example_contains_chat_messages():
@@ -30,6 +30,28 @@ def test_build_chat_example_contains_chat_messages():
     assert assistant_payload["course_codes"] == ["CS 101"]
     assert assistant_payload["emails"] == ["jane@example.edu"]
     assert "40%" in assistant_payload["grading_weights"]
+    assert isinstance(assistant_payload["study_plan"], list)
+    assert len(assistant_payload["study_plan"]) >= 1
+    all_assignments = [x for block in assistant_payload["study_plan"] for x in block["assignments"]]
+    assert any("assignment 1" in a.lower() for a in all_assignments)
+
+
+def test_build_study_plan_groups_entities_under_section_headings():
+    text = "Intro meta\nAssignments\nPaper on topic X due Jan 5"
+    entities = [
+        {"label": "SECTION", "text": "Assignments", "start": 11, "end": 22, "source": "t"},
+        {
+            "label": "ASSIGNMENT",
+            "text": "Paper on topic X due Jan 5",
+            "start": 23,
+            "end": 50,
+            "source": "t",
+        },
+    ]
+    plan = build_study_plan(text, entities)
+    assert len(plan) == 1
+    assert plan[0]["section_heading"] == "Assignments"
+    assert plan[0]["assignments"]
 
 
 def test_build_finetune_dataset_writes_train_and_valid_files(tmp_path: Path):

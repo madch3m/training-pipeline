@@ -1,11 +1,19 @@
 import json
 from pathlib import Path
 
-from evaluate_structured_json import evaluate_sft_jsonl, parse_assistant_json
+from build_finetune_dataset import STUDY_PLAN_LIST_FIELDS
+from evaluate_structured_json import (
+    compare_assistant_payloads,
+    evaluate_sft_jsonl,
+    f1_precision_recall,
+    parse_assistant_json,
+)
 from generate_pipeline_data_report import build_report, count_nonempty_lines, document_ids_from_sft
 from pipeline_runner import SyllabusPipelineConfig
 
 
+def _minimal_study_plan() -> list[dict]:
+    return [{"section_heading": "", **{f: [] for f in STUDY_PLAN_LIST_FIELDS}}]
 def test_parse_assistant_json_valid():
     obj, err = parse_assistant_json('{"document_id":"1","course_codes":[]}')
     assert err is None and obj is not None
@@ -15,6 +23,41 @@ def test_parse_assistant_json_valid():
 def test_parse_assistant_json_invalid():
     obj, err = parse_assistant_json("not json")
     assert obj is None and err is not None
+
+
+def test_f1_precision_recall_empty_sets():
+    f1, p, r = f1_precision_recall(set(), set())
+    assert (f1, p, r) == (1.0, 1.0, 1.0)
+
+
+def test_f1_precision_recall_hallucinated_when_gold_empty():
+    f1, p, r = f1_precision_recall({"a"}, set())
+    assert f1 == 0.0 and p == 0.0 and r == 0.0
+
+
+def test_compare_assistant_payloads_perfect():
+    payload = {
+        "document_id": "d1",
+        "source_url": None,
+        "course_codes": ["CS101"],
+        "instructors": [],
+        "emails": [],
+        "section_names": [],
+        "assignments": [],
+        "readings": [],
+        "grading_weights": [],
+        "due_dates": [],
+        "course_dates": [],
+        "concepts": [],
+        "study_plan": _minimal_study_plan(),
+        "text_field": "text",
+        "entities": [],
+    }
+    m = compare_assistant_payloads(payload, payload)
+    assert m["document_id_match"] is True
+    assert m["macro_f1_string_lists"] == 1.0
+    assert m["field_f1"]["course_codes"]["f1"] == 1.0
+    assert m["study_plan_macro_f1"] == 1.0
 
 
 def test_evaluate_sft_jsonl_on_sample(tmp_path: Path):
@@ -37,6 +80,7 @@ def test_evaluate_sft_jsonl_on_sample(tmp_path: Path):
                         "due_dates": [],
                         "course_dates": [],
                         "concepts": [],
+                        "study_plan": _minimal_study_plan(),
                         "text_field": "text",
                         "entities": [],
                     },
@@ -68,6 +112,7 @@ def test_train_valid_overlap_detects_duplicate_doc_id(tmp_path: Path):
             "due_dates": [],
             "course_dates": [],
             "concepts": [],
+            "study_plan": _minimal_study_plan(),
             "text_field": "text",
             "entities": [],
         }

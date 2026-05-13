@@ -4,7 +4,7 @@ import argparse
 import json
 import random
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from pipeline_errors import log_pipeline_error
 from process_syllabi_jsonl import (
@@ -22,6 +22,21 @@ SYSTEM_PROMPT = (
     "Return valid JSON only, matching the requested schema exactly."
 )
 
+# Maps each ``study_plan`` block field to the entity ``label`` from regex / heuristic NER.
+PLAN_FIELD_TO_ENTITY_LABEL: dict[str, str] = {
+    "course_codes": "COURSE",
+    "readings": "READING",
+    "assignments": "ASSIGNMENT",
+    "due_dates": "DUE_DATE",
+    "course_dates": "COURSE_DATE",
+    "concepts": "CONCEPT",
+    "grading_weights": "GRADING_WEIGHT",
+    "instructors": "INSTRUCTOR",
+    "emails": "EMAIL",
+}
+
+STUDY_PLAN_LIST_FIELDS: tuple[str, ...] = tuple(PLAN_FIELD_TO_ENTITY_LABEL.keys())
+
 
 def unique_texts(items: Iterable[dict], label: str) -> list[str]:
     seen: set[str] = set()
@@ -36,6 +51,70 @@ def unique_texts(items: Iterable[dict], label: str) -> list[str]:
         seen.add(normalized)
         values.append(text)
     return values
+
+
+def _normalized_entity_dicts(entities: Iterable[dict]) -> list[dict[str, Any]]:
+    """Keep only span dicts with usable ``label``, ``text``, and integer offsets."""
+    out: list[dict[str, Any]] = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        label = entity.get("label")
+        text = entity.get("text")
+        if not isinstance(label, str) or not isinstance(text, str):
+            continue
+        try:
+            start = int(entity["start"])
+            end = int(entity["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        out.append({**entity, "label": label, "text": text, "start": start, "end": end})
+    return out
+
+
+def build_study_plan(text: str, entities: list[dict]) -> list[dict[str, Any]]:
+    """Group first-pass entities by syllabus section span (SECTION labels) into study-plan blocks.
+
+    Each block lists readings, assignments, dates, concepts, etc. found in that region of the
+    document so the model can learn to emit a schedule-style view from the same signals.
+    """
+    n = len(text)
+    normalized = _normalized_entity_dicts(entities)
+    section_spans = sorted(
+        (e for e in normalized if e["label"] == "SECTION"),
+        key=lambda e: e["start"],
+    )
+    intervals: list[tuple[int, int, str]] = []
+    if not section_spans:
+        intervals.append((0, n, ""))
+    else:
+        if section_spans[0]["start"] > 0:
+            intervals.append((0, section_spans[0]["start"], ""))
+        for i, sec in enumerate(section_spans):
+            lo = sec["start"]
+            hi = section_spans[i + 1]["start"] if i + 1 < len(section_spans) else n
+            intervals.append((lo, hi, sec["text"].strip()))
+
+    blocks: list[dict[str, Any]] = []
+    for lo, hi, heading in intervals:
+        if lo >= hi:
+            continue
+        in_segment = [
+            e for e in normalized if lo <= e["start"] < hi and e["label"] != "SECTION"
+        ]
+        row: dict[str, Any] = {"section_heading": heading}
+        for field, ent_label in PLAN_FIELD_TO_ENTITY_LABEL.items():
+            row[field] = unique_texts(in_segment, ent_label)
+        has_content = heading or any(row[f] for f in STUDY_PLAN_LIST_FIELDS)
+        if has_content:
+            blocks.append(row)
+
+    if not blocks:
+        row = {"section_heading": ""}
+        for field, ent_label in PLAN_FIELD_TO_ENTITY_LABEL.items():
+            row[field] = unique_texts(normalized, ent_label)
+        blocks.append(row)
+    return blocks
 
 
 def section_names_from_entities(entities: Iterable[dict]) -> list[str]:
@@ -61,6 +140,8 @@ def build_structured_target(record: dict, index: int) -> dict:
     ner_entities = [entity.__dict__ for entity in extract_heuristic_ner(text)]
     all_entities = regex_entities + ner_entities
 
+    study_plan = build_study_plan(text, all_entities)
+
     return {
         "document_id": normalize_record_id(record, index),
         "source_url": record.get("source_url"),
@@ -74,6 +155,7 @@ def build_structured_target(record: dict, index: int) -> dict:
         "due_dates": unique_texts(regex_entities, "DUE_DATE"),
         "course_dates": unique_texts(regex_entities, "COURSE_DATE"),
         "concepts": unique_texts(ner_entities, "CONCEPT"),
+        "study_plan": study_plan,
         "text_field": text_field,
         "entities": all_entities,
     }
@@ -88,7 +170,11 @@ def build_chat_example(record: dict, index: int, max_text_chars: int) -> dict:
         "Return JSON with keys: "
         "document_id, source_url, course_codes, instructors, emails, section_names, "
         "assignments, readings, grading_weights, due_dates, course_dates, concepts, "
-        "text_field, entities.\n\n"
+        "study_plan, text_field, entities.\n"
+        "The study_plan value must be a JSON array of objects, one per syllabus section region, "
+        "each with section_heading (string) and the same list-of-strings fields as the top level "
+        "(course_codes, readings, assignments, due_dates, course_dates, concepts, grading_weights, "
+        "instructors, emails), grouping items that fall under that section.\n\n"
         f"Document text:\n{trimmed_text}"
     )
     return {
