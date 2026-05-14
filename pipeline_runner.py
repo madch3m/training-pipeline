@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,6 +80,20 @@ class SyllabusPipelineConfig:
     min_schema_clean_rate: float = 0.995
     max_document_id_overlap: int = 0
     max_domain_overlap_ratio: float = 0.70
+    # SyllabusFacts teacher-distillation pipeline (used by stages: label_deepseek,
+    # label_gpt4o_golden, label_gpt4o_arbitrate, merge_labels, build_facts).
+    deepseek_facts_jsonl: Path = Path("data/labeled/deepseek_facts.jsonl")
+    gpt4o_golden_jsonl: Path = Path("data/labeled/gpt4o_golden.jsonl")
+    gpt4o_arbitration_jsonl: Path = Path("data/labeled/gpt4o_arbitration.jsonl")
+    teacher_labels_jsonl: Path = Path("data/labeled/teacher_labels.jsonl")
+    golden_facts_jsonl: Path = Path("data/labeled/golden_facts.jsonl")
+    facts_train_jsonl: Path = Path("data/finetune_facts/train.jsonl")
+    facts_valid_jsonl: Path = Path("data/finetune_facts/valid.jsonl")
+    deepseek_model: str = "deepseek-chat"
+    gpt4o_model: str = "gpt-4o-2024-11-20"
+    label_max_text_chars: int = 20_000
+    golden_ids_file: Path | None = None
+    arbitration_ids_file: Path | None = None
 
     @classmethod
     def for_repo(cls, repo_root: Path) -> SyllabusPipelineConfig:
@@ -93,6 +108,13 @@ class SyllabusPipelineConfig:
             valid_jsonl=rr / "data" / "finetune" / "valid.jsonl",
             model_output_dir=rr / "artifacts" / "hf_syllabus_extractor",
             mlflow_tracking_uri=os.environ.get("MLFLOW_TRACKING_URI") or (rr / "mlruns").resolve().as_uri(),
+            deepseek_facts_jsonl=rr / "data" / "labeled" / "deepseek_facts.jsonl",
+            gpt4o_golden_jsonl=rr / "data" / "labeled" / "gpt4o_golden.jsonl",
+            gpt4o_arbitration_jsonl=rr / "data" / "labeled" / "gpt4o_arbitration.jsonl",
+            teacher_labels_jsonl=rr / "data" / "labeled" / "teacher_labels.jsonl",
+            golden_facts_jsonl=rr / "data" / "labeled" / "golden_facts.jsonl",
+            facts_train_jsonl=rr / "data" / "finetune_facts" / "train.jsonl",
+            facts_valid_jsonl=rr / "data" / "finetune_facts" / "valid.jsonl",
         )
 
 
@@ -209,13 +231,94 @@ def step_train(cfg: SyllabusPipelineConfig) -> None:
         sys.argv = old
 
 
+def step_label_deepseek(cfg: SyllabusPipelineConfig) -> None:
+    _chdir_repo(cfg)
+    cmd = [
+        sys.executable, "label_with_deepseek.py",
+        "--input-jsonl", str(cfg.text_jsonl),
+        "--output-jsonl", str(cfg.deepseek_facts_jsonl),
+        "--model", cfg.deepseek_model,
+        "--max-text-chars", str(cfg.label_max_text_chars),
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def step_label_gpt4o_golden(cfg: SyllabusPipelineConfig) -> None:
+    _chdir_repo(cfg)
+    if cfg.golden_ids_file is None:
+        raise ValueError("cfg.golden_ids_file must be set for label_gpt4o_golden")
+    cmd = [
+        sys.executable, "label_with_gpt4o.py",
+        "--input-jsonl", str(cfg.text_jsonl),
+        "--output-jsonl", str(cfg.gpt4o_golden_jsonl),
+        "--model", cfg.gpt4o_model,
+        "--mode", "golden",
+        "--golden-ids", str(cfg.golden_ids_file),
+        "--max-text-chars", str(cfg.label_max_text_chars),
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def step_label_gpt4o_arbitrate(cfg: SyllabusPipelineConfig) -> None:
+    _chdir_repo(cfg)
+    if cfg.arbitration_ids_file is None:
+        raise ValueError("cfg.arbitration_ids_file must be set for label_gpt4o_arbitrate")
+    cmd = [
+        sys.executable, "label_with_gpt4o.py",
+        "--input-jsonl", str(cfg.text_jsonl),
+        "--output-jsonl", str(cfg.gpt4o_arbitration_jsonl),
+        "--model", cfg.gpt4o_model,
+        "--mode", "arbitrate",
+        "--arbitration-ids", str(cfg.arbitration_ids_file),
+        "--max-text-chars", str(cfg.label_max_text_chars),
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def step_merge_labels(cfg: SyllabusPipelineConfig) -> None:
+    _chdir_repo(cfg)
+    cmd = [
+        sys.executable, "merge_teacher_labels.py",
+        "--deepseek-jsonl", str(cfg.deepseek_facts_jsonl),
+        "--gpt4o-jsonl", str(cfg.gpt4o_arbitration_jsonl),
+        "--golden-jsonl", str(cfg.golden_facts_jsonl),
+        "--output-jsonl", str(cfg.teacher_labels_jsonl),
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def step_build_facts(cfg: SyllabusPipelineConfig) -> None:
+    _chdir_repo(cfg)
+    cmd = [
+        sys.executable, "build_facts_dataset.py",
+        "--text-jsonl", str(cfg.text_jsonl),
+        "--labels-jsonl", str(cfg.teacher_labels_jsonl),
+        "--train-output", str(cfg.facts_train_jsonl),
+        "--valid-output", str(cfg.facts_valid_jsonl),
+        "--max-text-chars", str(cfg.max_text_chars),
+        "--validation-ratio", str(cfg.validation_ratio),
+        "--seed", str(cfg.finetune_seed),
+    ]
+    subprocess.run(cmd, check=True)
+
+
 def run_syllabus_training_pipeline(
     cfg: SyllabusPipelineConfig,
     *,
     steps: Sequence[str] = ("csv", "ingest", "process", "build", "train"),
 ) -> None:
-    """Run pipeline stages in order. ``steps`` entries: csv, ingest, process, build, train."""
-    allowed = {"csv", "ingest", "process", "build", "train"}
+    """Run pipeline stages in order.
+
+    Legacy stages: ``csv``, ``ingest``, ``process``, ``build``, ``train``.
+    Teacher-distillation stages (SyllabusFacts target):
+      ``label_deepseek``, ``label_gpt4o_golden``, ``label_gpt4o_arbitrate``,
+      ``merge_labels``, ``build_facts``.
+    """
+    allowed = {
+        "csv", "ingest", "process", "build", "train",
+        "label_deepseek", "label_gpt4o_golden", "label_gpt4o_arbitrate",
+        "merge_labels", "build_facts",
+    }
     for name in steps:
         if name not in allowed:
             raise ValueError(f"Unknown step {name!r}; allowed: {sorted(allowed)}")
@@ -237,3 +340,18 @@ def run_syllabus_training_pipeline(
             print(f"[train] Starting LoRA SFT → {cfg.model_output_dir}")
             step_train(cfg)
             print("[train] Done.")
+        elif name == "label_deepseek":
+            print(f"[label_deepseek] → {cfg.deepseek_facts_jsonl}")
+            step_label_deepseek(cfg)
+        elif name == "label_gpt4o_golden":
+            print(f"[label_gpt4o_golden] → {cfg.gpt4o_golden_jsonl}")
+            step_label_gpt4o_golden(cfg)
+        elif name == "label_gpt4o_arbitrate":
+            print(f"[label_gpt4o_arbitrate] → {cfg.gpt4o_arbitration_jsonl}")
+            step_label_gpt4o_arbitrate(cfg)
+        elif name == "merge_labels":
+            print(f"[merge_labels] → {cfg.teacher_labels_jsonl}")
+            step_merge_labels(cfg)
+        elif name == "build_facts":
+            print(f"[build_facts] → {cfg.facts_train_jsonl}")
+            step_build_facts(cfg)
