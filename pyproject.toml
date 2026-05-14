@@ -26,5 +26,9 @@ train = [
   "trl>=0.18.0",
 ]
 
+[tool.setuptools.packages.find]
+include = ["edge*"]
+exclude = ["notebooks*", "tests*", "docs*", "data*", "artifacts*", "reports*", "mlruns*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
