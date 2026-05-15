@@ -95,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Label syllabi with GPT-4o (strict JSON schema).")
     p.add_argument("--input-jsonl", default="data/ingested/us_freshman_core_syllabi_with_text.jsonl")
     p.add_argument("--output-jsonl", required=True)
-    p.add_argument("--model", default="gpt-4o-2024-11-20")
+    p.add_argument("--model", default="gpt-5")
     p.add_argument("--api-key-env", default="OPENAI_API_KEY")
     p.add_argument("--max-text-chars", type=int, default=20_000)
     p.add_argument(
@@ -189,11 +189,23 @@ def main() -> None:
             if i % 10 == 0:
                 print(f"[gpt-4o] {i} processed: ok={n_ok} fail={n_fail} skip={n_skip}")
 
-    # GPT-4o pricing reference (2026): $2.50 / M input, $10.00 / M output.
-    cost = (total_in / 1e6 * 2.50) + (total_out / 1e6 * 10.00)
+    # Approximate per-million-token pricing for cost estimation. Falls back to a
+    # generic ratio when the model isn't in the table; verify exact spend in the
+    # OpenAI billing dashboard.
+    pricing_usd_per_m: dict[str, tuple[float, float]] = {
+        "gpt-5": (10.00, 30.00),
+        "gpt-5-mini": (1.00, 4.00),
+        "gpt-4.1": (2.00, 8.00),
+        "gpt-4.1-mini": (0.40, 1.60),
+        "gpt-4o": (2.50, 10.00),
+        "gpt-4o-2024-11-20": (2.50, 10.00),
+        "gpt-4o-mini": (0.15, 0.60),
+    }
+    in_rate, out_rate = pricing_usd_per_m.get(args.model, (5.00, 15.00))
+    cost = (total_in / 1e6 * in_rate) + (total_out / 1e6 * out_rate)
     print(
-        f"[gpt-4o] DONE ok={n_ok} fail={n_fail} skip={n_skip} | "
-        f"tokens in={total_in} out={total_out} | est cost ~${cost:.2f}"
+        f"[{args.model}] DONE ok={n_ok} fail={n_fail} skip={n_skip} | "
+        f"tokens in={total_in} out={total_out} | est cost ~${cost:.2f} (approximate)"
     )
 
 
