@@ -62,6 +62,8 @@ def call_openai(client, model: str, system_prompt: str, user_prompt: str, max_re
     last_err: Exception | None = None
     for attempt in range(max_retries):
         try:
+            # gpt-5 rejects non-default temperature; rely on strict JSON schema for
+            # structural determinism and `seed` for best-effort run-to-run stability.
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -72,7 +74,7 @@ def call_openai(client, model: str, system_prompt: str, user_prompt: str, max_re
                     "type": "json_schema",
                     "json_schema": {"name": "SyllabusFacts", "schema": SCHEMA, "strict": True},
                 },
-                temperature=0.0,
+                seed=13,
             )
             return (
                 response.choices[0].message.content or "",
@@ -187,7 +189,7 @@ def main() -> None:
                 n_fail += 1
             fh.flush()
             if i % 10 == 0:
-                print(f"[gpt-4o] {i} processed: ok={n_ok} fail={n_fail} skip={n_skip}")
+                print(f"[{args.model}] {i} processed: ok={n_ok} fail={n_fail} skip={n_skip}")
 
     # Approximate per-million-token pricing for cost estimation. Falls back to a
     # generic ratio when the model isn't in the table; verify exact spend in the
