@@ -23,14 +23,23 @@ from process_syllabi_jsonl import (
     load_jsonl,
     normalize_record_id,
 )
-from syllabus_schema import SyllabusFacts
+from syllabus_schema import SyllabusFacts, to_strict_schema
 
+
+# DeepSeek's json_object mode enforces valid JSON only, not schema conformance.
+# The prompt must therefore carry the schema explicitly; otherwise the model
+# invents field names (observed: course_name, instructors-as-objects, office_hours,
+# grading-as-dict). Schema adds ~1500 tokens / request (~$0.0004 at V3 pricing).
+_SCHEMA_JSON = json.dumps(to_strict_schema(SyllabusFacts), ensure_ascii=True, indent=2)
 
 SYSTEM_PROMPT = (
     "You extract structured facts from university syllabus documents. "
-    "Return JSON conforming exactly to the SyllabusFacts schema. "
-    "Set due_date ONLY when the syllabus explicitly states a date — never infer or guess. "
-    "Set fields to null when the document does not state them."
+    "Return JSON matching this schema exactly. Do not add fields that are not "
+    "in the schema; do not rename fields; use null for any field the document "
+    "does not state. Set due_date ONLY when the syllabus explicitly states a "
+    "date — never infer or guess.\n\n"
+    "JSON Schema:\n"
+    f"{_SCHEMA_JSON}"
 )
 
 

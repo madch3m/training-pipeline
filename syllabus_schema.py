@@ -11,7 +11,7 @@ Two qualitatively different stages:
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -107,3 +107,33 @@ class StudyPlan(BaseModel):
     inference_date: date
     weeks: list[WeekPlan]
     advice: Optional[str] = None
+
+
+def to_strict_schema(model_cls: type[BaseModel]) -> dict[str, Any]:
+    """Pydantic JSON Schema → strict-mode compatible (OpenAI strict + DeepSeek prompt).
+
+    Sets ``additionalProperties: false`` on every object and adds every property
+    to ``required``. Nullables use anyOf-with-null, which Pydantic emits for
+    ``Optional`` fields already. Used by:
+    - ``label_with_gpt4o.py`` to satisfy OpenAI's strict response_format.
+    - ``label_with_deepseek.py`` to embed the schema in DeepSeek's system prompt
+      (DeepSeek's json_object mode only enforces valid JSON, not schema shape, so
+      the prompt needs to carry the schema explicitly).
+    """
+
+    raw = model_cls.model_json_schema()
+
+    def harden(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                node["additionalProperties"] = False
+                if "properties" in node:
+                    node["required"] = list(node["properties"].keys())
+            for v in node.values():
+                harden(v)
+        elif isinstance(node, list):
+            for item in node:
+                harden(item)
+
+    harden(raw)
+    return raw

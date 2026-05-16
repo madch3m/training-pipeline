@@ -26,36 +26,10 @@ from process_syllabi_jsonl import (
     load_jsonl,
     normalize_record_id,
 )
-from syllabus_schema import SyllabusFacts
+from syllabus_schema import SyllabusFacts, to_strict_schema
 
 
-def to_openai_strict_schema(model_cls) -> dict[str, Any]:
-    """Pydantic JSON Schema → OpenAI strict-mode schema.
-
-    OpenAI strict mode requires every object to set additionalProperties=false and
-    list every property in ``required`` (nullables use anyOf-with-null, which Pydantic
-    already emits for ``Optional`` fields).
-    """
-
-    raw = model_cls.model_json_schema()
-
-    def harden(node: Any) -> None:
-        if isinstance(node, dict):
-            if node.get("type") == "object":
-                node["additionalProperties"] = False
-                if "properties" in node:
-                    node["required"] = list(node["properties"].keys())
-            for v in node.values():
-                harden(v)
-        elif isinstance(node, list):
-            for item in node:
-                harden(item)
-
-    harden(raw)
-    return raw
-
-
-SCHEMA = to_openai_strict_schema(SyllabusFacts)
+SCHEMA = to_strict_schema(SyllabusFacts)
 
 
 def call_openai(client, model: str, system_prompt: str, user_prompt: str, max_retries: int = 3) -> tuple[str, int, int]:
