@@ -11,6 +11,9 @@ Also surfaces:
 - coverage per important field (how many of the rows have it filled).
 - grading-weight sanity (warns when sum is outside [80, 110] — wide window allows
   for "drop lowest" mechanics and partial schemes).
+- due_date sanity (warns when any task's due_date year is outside [2000, 2030] —
+  catches hallucinated dates that Pydantic accepts as valid years but are clearly
+  invented; gpt-5 has been observed producing years like 1129).
 
 Exit code: 0 if no ``fail`` rows; 1 otherwise. Unfilled rows do not fail the run.
 """
@@ -35,6 +38,12 @@ COVERAGE_FIELDS: tuple[str, ...] = (
     "term",
     "class_meeting_pattern",
 )
+
+# Heuristic year window for due_date sanity. Pydantic accepts any positive year as
+# a valid date, so years like 1129 (observed in gpt-5 hallucinations) pass schema
+# validation but are obviously wrong for a present-day university syllabus.
+MIN_DUE_YEAR = 2000
+MAX_DUE_YEAR = 2030
 
 
 def is_unfilled(facts: dict[str, Any]) -> bool:
@@ -65,6 +74,29 @@ def grading_weight_total(facts: dict[str, Any]) -> float:
         except (TypeError, ValueError):
             pass
     return total
+
+
+def collect_suspicious_due_dates(
+    facts: dict[str, Any],
+    min_year: int = MIN_DUE_YEAR,
+    max_year: int = MAX_DUE_YEAR,
+) -> list[str]:
+    """Return human-readable warnings for tasks whose due_date.year is out of range."""
+    out: list[str] = []
+    for idx, task in enumerate(facts.get("all_tasks") or []):
+        if not isinstance(task, dict):
+            continue
+        due = task.get("due_date")
+        if due is None:
+            continue
+        try:
+            year = int(str(due)[:4])
+        except (ValueError, TypeError):
+            continue
+        if year < min_year or year > max_year:
+            title = task.get("title", "?")
+            out.append(f"task[{idx}] '{title}' due_date={due} (year={year})")
+    return out
 
 
 def format_validation_error(exc: ValidationError) -> list[str]:
@@ -108,6 +140,7 @@ def main() -> None:
     n_ok = n_fail = n_unfilled = 0
     coverage = Counter()
     weight_warnings: list[tuple[int, float]] = []
+    date_warnings: list[tuple[int, list[str]]] = []
     per_row_report: list[dict[str, Any]] = []
 
     for idx, row in enumerate(rows, 1):
@@ -149,11 +182,20 @@ def main() -> None:
         total = grading_weight_total(facts)
         if total and not (80.0 <= total <= 110.0):
             weight_warnings.append((idx, total))
+        date_warns = collect_suspicious_due_dates(facts)
+        if date_warns:
+            date_warnings.append((idx, date_warns))
 
         if not args.quiet:
             label = facts.get("course_code") or facts.get("course_title") or ""
             print(f"[ok]   row {idx:3d}  doc={short_id}  {label}")
-        per_row_report.append({"row": idx, "status": "ok", "doc_id": doc_id, "grading_weight_total": total})
+        per_row_report.append({
+            "row": idx,
+            "status": "ok",
+            "doc_id": doc_id,
+            "grading_weight_total": total,
+            "date_warnings": date_warns,
+        })
 
     total_rows = len(rows)
     print(f"\n[summary] valid={n_ok} invalid={n_fail} unfilled={n_unfilled} of {total_rows}")
@@ -165,6 +207,11 @@ def main() -> None:
     if weight_warnings:
         rows_str = ", ".join(f"row {r} (sum={t:.0f}%)" for r, t in weight_warnings[:10])
         print(f"[warn] grading weights outside [80, 110]: {rows_str}")
+    if date_warnings:
+        print(f"[warn] suspicious due_date years (outside [{MIN_DUE_YEAR}, {MAX_DUE_YEAR}]):")
+        for row_idx, warns in date_warnings[:10]:
+            for w in warns:
+                print(f"          row {row_idx}: {w}")
 
     if args.report_json:
         Path(args.report_json).parent.mkdir(parents=True, exist_ok=True)
@@ -179,6 +226,7 @@ def main() -> None:
                     },
                     "coverage": dict(coverage),
                     "weight_warnings": [{"row": r, "total": t} for r, t in weight_warnings],
+                    "date_warnings": [{"row": r, "warnings": w} for r, w in date_warnings],
                     "rows": per_row_report,
                 },
                 indent=2,
