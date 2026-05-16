@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 TaskType = Literal[
@@ -27,6 +27,15 @@ TaskType = Literal[
     "discussion",
 ]
 
+# Sane year window for ``StudyTask.due_date``. Pydantic accepts any positive year
+# as a valid date, but values outside this window almost always mean the labeler
+# hallucinated (gpt-5 has been observed constructing 4-digit "years" like 1129
+# or 7230 from ``M/D``-only source dates). Out-of-range values are coerced to
+# ``None`` silently in the schema; ``validate_golden_facts.py`` still surfaces
+# them as warnings on the raw JSON so reviewers see them before coercion.
+MIN_DUE_YEAR = 2000
+MAX_DUE_YEAR = 2030
+
 
 class StudyTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -36,6 +45,15 @@ class StudyTask(BaseModel):
     due_date: Optional[date] = None
     estimated_minutes: Optional[int] = Field(default=None, ge=5, le=600)
     source_section: Optional[str] = None
+
+    @field_validator("due_date", mode="after")
+    @classmethod
+    def _drop_implausible_year(cls, value: Optional[date]) -> Optional[date]:
+        if value is None:
+            return value
+        if value.year < MIN_DUE_YEAR or value.year > MAX_DUE_YEAR:
+            return None
+        return value
 
 
 class GradingItem(BaseModel):

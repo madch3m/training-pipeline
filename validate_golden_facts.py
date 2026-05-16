@@ -28,7 +28,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from syllabus_schema import SyllabusFacts
+from syllabus_schema import MAX_DUE_YEAR, MIN_DUE_YEAR, SyllabusFacts
 
 
 COVERAGE_FIELDS: tuple[str, ...] = (
@@ -38,12 +38,6 @@ COVERAGE_FIELDS: tuple[str, ...] = (
     "term",
     "class_meeting_pattern",
 )
-
-# Heuristic year window for due_date sanity. Pydantic accepts any positive year as
-# a valid date, so years like 1129 (observed in gpt-5 hallucinations) pass schema
-# validation but are obviously wrong for a present-day university syllabus.
-MIN_DUE_YEAR = 2000
-MAX_DUE_YEAR = 2030
 
 
 def is_unfilled(facts: dict[str, Any]) -> bool:
